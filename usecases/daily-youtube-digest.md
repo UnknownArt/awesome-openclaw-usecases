@@ -11,60 +11,85 @@ Plus: it's fun to start the day with curated content insights instead of doom-sc
 ## What It Does
 
 - Fetches the latest videos from a list of your favorite channels
-- Summarizes or extracts key insights from each video's transcript
-- Delivers a digest to you daily (or on demand)
+- Extracts transcripts directly with **yt-dlp** (no external API, no credits, works offline)
+- Summarizes key insights per video in Korean (or any language)
+- Delivers a daily digest on demand or via cron
 
-## Skills You Need
+## Requirements
 
-Install the [youtube-full](https://clawhub.ai/therohitdas/youtube-full) skill.
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) installed and on PATH
+- OpenClaw with `terminal` MCP enabled
 
-Just tell your OpenClaw:
+No API keys, no third-party services, no per-transcript costs.
 
-```text
-"Install the youtube-full skill and set it up for me"
-```
-or 
+## How It Works
+
+### Transcript Extraction (yt-dlp)
+
+For each video, run via the `terminal` MCP:
 
 ```bash
-npx clawhub@latest install youtube-full
+cd ~/.openclaw/workspace/.cache/yt
+yt-dlp --write-auto-sub --write-sub \
+  --sub-lang "ko-orig,ko,en,en-orig" \
+  --skip-download --sub-format vtt \
+  -o "%(id)s.%(ext)s" \
+  "https://youtu.be/<VIDEO_ID>"
 ```
 
-That's it. The agent handles the rest — including account creation and API key setup. You get **100 free credits on signup**, no credit card required.
+This downloads the subtitle file as `<videoId>.<lang>.vtt`. No video is downloaded — only the subtitle track.
 
-> Note: After creating the account, the skill auto-stores the API key securely in correct locations based on the OS, so the API will work in all contexts.
+**Language priority:** `ko-orig` → `ko` → `en-orig` → `en`
 
-![youtube-full skill installation](https://pub-15904f15a44a4ea69350737e87660b92.r2.dev/media/1770620159490-e41e7baa.png)
+### VTT Cleanup
 
-### Why TranscriptAPI.com over yt-dlp?
+VTT files contain timestamps and duplicate lines. Strip them before summarizing:
 
-| CLI tools (yt-dlp, etc.) | TranscriptAPI |
-|--------------------------|---------------|
-| Verbose logs flood agent context | Clean JSON responses |
-| Doesn't work on GCP/cloud OpenClaw | Works everywhere, fast |
-| Gets blocked randomly by YouTube | Powers [YouTubeToTranscript.com](https://youtubetotranscript.com) serving millions. Cached and reliable. |
-| Requires binary installation | No binaries, just HTTP |
+```python
+import re
+
+def clean_vtt(text):
+    out, prev = [], ""
+    for line in text.splitlines():
+        if line.startswith("WEBVTT") or "-->" in line:
+            continue
+        if re.match(r"^(align|position|line|size):", line):
+            continue
+        line = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d+>", "", line)
+        line = re.sub(r"</?c>", "", line).strip()
+        if not line or line == prev:
+            continue
+        out.append(line)
+        prev = line
+    return "\n".join(out)
+```
+
+### Metadata
+
+Enrich each video with `mcp__youtube__getVideoDetails` (title, channel, duration, view count, description).
 
 ## How to Set It Up
 
 ### Option 1: Channel-based digest
 
-Prompt OpenClaw:
+Save your channel list to `~/.openclaw/workspace/assets/yt-channels.json`:
+
+```json
+[
+  { "id": "UCxxxxxx", "name": "채널이름", "lang": "ko" },
+  { "id": "UCyyyyyy", "name": "ChannelName", "lang": "en" }
+]
+```
+
+Then prompt OpenClaw:
 
 ```text
-Every morning at 8am, fetch the latest videos from these YouTube channels and give me a digest with key insights from each:
-
-- @TED
-- @Fireship
-- @ThePrimeTimeagen
-- @lexfridman
-
-For each new video (uploaded in the last 24-48 hours):
-1. Get the transcript
-2. Summarize the main points in 2-3 bullets
-3. Include the video title, channel name, and link
-
-If a channel handle doesn't resolve, search for it and find the correct one.
-Save my channel list to memory so I can add/remove channels later.
+매일 아침 8시에 yt-channels.json의 채널 목록에서 지난 24시간 이내 업로드된 영상을 가져와줘.
+각 영상마다:
+1. yt-dlp로 자막 추출 (.cache/yt/ 에 저장)
+2. VTT 정제 후 핵심 내용 3~5줄 요약
+3. 제목, 채널명, 링크 포함
+결과를 memory/yt-digest-YYYY-MM-DD.md 에 저장하고 텔레그램으로 전송해줘.
 ```
 
 ### Option 2: Keyword-based digest
@@ -72,25 +97,29 @@ Save my channel list to memory so I can add/remove channels later.
 Track new videos about a specific topic:
 
 ```text
-Every day, search YouTube for new videos about "OpenClaw" (or "Claude Code", "AI agents", etc).
+매일 "AI agents" 또는 "Claude Code" 키워드로 YouTube 검색을 해줘.
+~/.openclaw/workspace/assets/seen-videos.txt 에 이미 처리한 영상 ID를 관리해서 중복 처리하지 마.
+새 영상마다:
+1. yt-dlp로 자막 추출
+2. 핵심 3줄 요약
+3. 내 작업과 관련성 메모
 
-Maintain a file called seen-videos.txt with video IDs you've already processed.
-Only fetch transcripts for videos NOT in that file.
-After processing, add the video ID to seen-videos.txt.
-
-For each new video:
-1. Get the transcript
-2. Give me a 3-bullet summary
-3. Note anything relevant to my work
-
-Run this every morning at 9am.
+매일 오전 9시에 실행해줘.
 ```
-
-This way you never waste credits re-fetching videos you've already seen.
 
 ## Tips
 
-- `channel/latest` and `channel/resolve` are **free** (0 credits) — checking for new uploads costs nothing
-- Only transcripts cost 1 credit each
-- Ask for different digest styles: key takeaways, notable quotes, timestamps of interesting moments
-- This already exists as a product - [Recapio - Daily YouTube Recap](https://recapio.com/features/daily-recaps)
+- `mcp__youtube__getChannelTopVideos` — 채널 최신 영상 목록 조회 (무료)
+- `mcp__youtube__searchVideos` — 키워드 검색 (무료)
+- yt-dlp VTT 파일은 `.cache/yt/` 에 캐시되므로 재실행 시 재다운로드 없음
+- 7일 이상 된 VTT 파일은 주기적으로 정리 권장
+- 자막 없는 영상은 스킵하고 스킵 이유를 다이제스트에 명시
+
+## Important: Transcript Extraction Rule
+
+`mcp__youtube__getTranscripts` 가 빈 배열을 반환해도 **"자막 없음"으로 판정하지 말 것**.  
+항상 yt-dlp를 먼저 실행하고, `.vtt` 파일이 실제로 없을 때만 사용자에게 알린다.
+
+## Related
+
+- This already exists as a product — [Recapio - Daily YouTube Recap](https://recapio.com/features/daily-recaps)
